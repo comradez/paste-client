@@ -12,6 +12,8 @@ OpenSSL installed on your system (For example, `libssl-dev` on Ubuntu, or `opens
 
 Requires `sudo` to put the executable to `/usr/local/bin`
 
+Please manually set the server url in `~/.config/paste-client/config.toml`
+
 ## Uninstallation
 
 `./uninstall.sh`
