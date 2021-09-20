@@ -2,6 +2,10 @@
 
 A online pastebin cli-frontend.
 
+## Prequisities
+
+OpenSSL installed on your system (For example, `libssl-dev` on Ubuntu, or `openssl-devel` on Fedora).
+
 ## Installation
 
 `./install.sh`
