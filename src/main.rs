@@ -2,11 +2,11 @@ extern crate clap;
 use clap::{Parser, Subcommand};
 use config::Config;
 use serde_derive::{Serialize, Deserialize};
-use std::io::{stdin, Read, Write};
+use std::{io::{stdin, Read, Write}, path::{PathBuf}};
 
 mod config;
 
-fn get_url(path: &str) -> std::io::Result<Config> {
+fn get_url(path: &PathBuf) -> std::io::Result<Config> {
     let mut f = std::fs::File::open(path)?;
     let mut buf = String::new();
     f.read_to_string(&mut buf)?;
@@ -14,7 +14,7 @@ fn get_url(path: &str) -> std::io::Result<Config> {
     Ok(config)
 }
 
-fn set_username(username: &str, path: &str, base_url: &str) -> std::io::Result<()> {
+fn set_username(username: &str, path: &PathBuf, base_url: &str) -> std::io::Result<()> {
     let mut f = std::fs::File::create(path)?;
     let config = Config {
         base_url: base_url.into(),
@@ -24,13 +24,13 @@ fn set_username(username: &str, path: &str, base_url: &str) -> std::io::Result<(
     Ok(())
 }
 
-fn save_history(token: &str, path: &str) -> std::io::Result<()> {
+fn save_history(token: &str, path: &PathBuf) -> std::io::Result<()> {
     let mut f = std::fs::File::create(path)?;
     f.write_all(token.as_bytes())?;
     Ok(())
 }
 
-fn read_history(path: &str) -> std::io::Result<String> {
+fn read_history(path: &PathBuf) -> std::io::Result<String> {
     let mut f = std::fs::File::open(path)?;
     let mut buf = String::new();
     f.read_to_string(&mut buf)?;
@@ -60,9 +60,19 @@ struct ExchangeMessage {
 }
 
 fn main() -> std::io::Result<()> {
-    let user_name = std::env::var("HOME").unwrap();
-    let config_path = format!("{}/.config/paste-client/config.toml", user_name);
-    let hist_path = format!("{}/.config/paste-client/history_token", user_name);
+    let mut home_dir = home::home_dir().unwrap();
+    home_dir.push(".config");
+    home_dir.push("paste-client");
+    let config_path = {
+        let mut config_path = home_dir.clone();
+        config_path.push("config.toml");
+        config_path
+    };
+    let history_path = {
+        let mut history_path = home_dir;
+        history_path.push("history_token");
+        history_path
+    };
     let config = get_url(&config_path).unwrap();
     let (base_url, username) = (config.base_url, config.username.unwrap_or("Anonymous".into()));
     let end_char = if cfg!(target_os = "windows") { 'Z' } else { 'D' };
@@ -89,7 +99,7 @@ fn main() -> std::io::Result<()> {
             let client = reqwest::blocking::Client::new();
             let resp = client.post(&base_url).body(message).send().unwrap();
             let token = resp.text().unwrap();
-            save_history(&token, &hist_path).expect("Failed to record history");
+            save_history(&token, &history_path).expect("Failed to record history");
             println!("\n{}/{}", &base_url, &token);
         },
         Commands::Delete { token } => {
@@ -102,7 +112,7 @@ fn main() -> std::io::Result<()> {
         Commands::Last => println!(
             "{}/{}",
             base_url,
-            read_history(&hist_path).unwrap_or("No history recorded!".to_string())
+            read_history(&history_path).unwrap_or("No history recorded!".to_string())
         ),
     }
     Ok(())
