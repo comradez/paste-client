@@ -1,8 +1,10 @@
 extern crate clap;
 use clap::{Parser, Subcommand};
 use config::Config;
+use reqwest::header::CONTENT_TYPE;
 use serde_derive::{Serialize, Deserialize};
-use std::{io::{stdin, Read, Write}, path::{PathBuf}};
+use std::io::{stdin, Read, Write};
+use std::path::PathBuf;
 
 mod config;
 
@@ -50,7 +52,18 @@ enum Commands {
     Send { message: Option<String> },
     Delete { token: String },
     Username { name: String },
-    Last
+    Last,
+    File {
+        #[clap(subcommand)]
+        command: V2Commands
+    }
+}
+
+#[derive(Subcommand)]
+enum V2Commands {
+    Get { token: String },
+    Send { path: PathBuf },
+    Delete { token: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -76,6 +89,7 @@ fn main() -> std::io::Result<()> {
     let config = get_url(&config_path).unwrap();
     let (base_url, username) = (config.base_url, config.username.unwrap_or("Anonymous".into()));
     let end_char = if cfg!(target_os = "windows") { 'Z' } else { 'D' };
+    let base_url_v2 = format!("{}/v2", base_url);
 
     let cli = Cli::parse();
     match cli.command {
@@ -114,6 +128,32 @@ fn main() -> std::io::Result<()> {
             base_url,
             read_history(&history_path).unwrap_or("No history recorded!".to_string())
         ),
+        Commands::File { command } => match command {
+            V2Commands::Get { token } => {
+                let url = format!("{}/{}", base_url_v2, token);
+                let mut downloaded = std::fs::File::create(&token).unwrap();
+                let resp = reqwest::blocking::get(url).unwrap();
+                downloaded.write_all(&resp.bytes().unwrap()).unwrap();
+                println!("Downloaded file {}", &token);
+            },
+            V2Commands::Send { path } => {
+                let client = reqwest::blocking::Client::new();
+                let uploading = std::fs::File::open(path).unwrap();
+                let resp = client.post(&format!("{}/", base_url_v2))
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(uploading)
+                    .send()
+                    .unwrap();
+                let token = resp.text().unwrap();
+                println!("{}/{}", &base_url_v2, &token);
+            },
+            V2Commands::Delete { token } => {
+                let url = format!("{}/{}", base_url_v2, token);
+                let client = reqwest::blocking::Client::new();
+                let resp = client.delete(url).send().unwrap();
+                println!("{}", resp.text().unwrap());    
+            },
+        }
     }
     Ok(())
 }
