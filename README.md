@@ -1,6 +1,6 @@
 # paste-client
 
-A online pastebin cli-frontend.
+An online pastebin cli-frontend.
 
 ## Prequisities
 
@@ -10,12 +10,12 @@ OpenSSL installed on your system (For example, `libssl-dev` on Ubuntu, or `opens
 
 `./install.sh`
 
-Requires `sudo` to put the executable to `/usr/local/bin`
+Requires root priviledge to put the executable to `/usr/local/bin`.
 
-Please manually set the server url in `~/.config/paste-client/config.toml`
+Please manually set the server url and proxy (optional) in `~/.config/paste-client/config.toml`.
 
 ## Uninstallation
 
 `./uninstall.sh`
 
-Requires `sudo` to remove the executable from `/usr/local/bin`
+Requires root priviledge to remove the executable from `/usr/local/bin`.
