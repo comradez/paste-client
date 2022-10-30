@@ -4,6 +4,7 @@ use crate::config::Config;
 use clap::{Parser, Subcommand};
 use indicatif::{ProgressBar, ProgressState, ProgressStyle};
 use reqwest::{
+    header::CONTENT_LENGTH,
     multipart::{Form, Part},
     Body,
 };
@@ -152,16 +153,17 @@ async fn main() -> Result<()> {
         Commands::File { command } => match command {
             V2Commands::Get { filename } => {
                 let url = base_url.join("v2/")?.join(filename.as_str())?;
-                let mut downloaded = tokio::fs::File::create(&filename)
-                    .await
-                    .context("Failed to create file.")?;
-
                 let header_resp = client.head(url.as_ref()).send().await?;
-                if let Some(content_length) = header_resp.content_length() {
+
+                if let Some(content_length) = header_resp.headers().get(CONTENT_LENGTH) {
+                    let content_length = content_length.to_str()?.parse::<u64>()?;
                     if content_length == 0 {
-                        println!("File not exist or length is zero, exiting...");
+                        println!("File not exist.");
                         exit(0);
                     }
+                    let mut downloaded = tokio::fs::File::create(&filename)
+                        .await
+                        .context("Failed to create file.")?;
                     let progress_bar = ProgressBar::new(content_length);
                     progress_bar
                         .set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
@@ -173,6 +175,9 @@ async fn main() -> Result<()> {
                         downloaded.write_all(&bytes).await?;
                     }
                 } else {
+                    let mut downloaded = tokio::fs::File::create(&filename)
+                        .await
+                        .context("Failed to create file.")?;
                     println!("Downloading...");
                     let resp = client.get(url.as_ref()).send().await?;
                     downloaded.write_all(&resp.bytes().await?).await?;
