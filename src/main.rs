@@ -1,41 +1,58 @@
-extern crate clap;
+use anyhow::{Context, Result};
+
+use crate::config::Config;
 use clap::{Parser, Subcommand};
-use config::Config;
-use reqwest::header::CONTENT_TYPE;
-use serde_derive::{Serialize, Deserialize};
-use std::io::{stdin, Read, Write};
-use std::path::PathBuf;
+use indicatif::{ProgressBar, ProgressState, ProgressStyle};
+use reqwest::{
+    multipart::{Form, Part},
+    Body,
+};
+use serde_derive::{Deserialize, Serialize};
+use std::{
+    io::{stdin, Read, Write},
+    path::PathBuf,
+    process::exit,
+};
+use tokio::io::AsyncWriteExt;
+use tokio_util::codec::{BytesCodec, FramedRead};
 
 mod config;
 
-fn get_url(path: &PathBuf) -> std::io::Result<Config> {
-    let mut f = std::fs::File::open(path)?;
+const END_CHAR: char = if cfg!(target_os = "windows") {
+    'Z'
+} else {
+    'D'
+};
+
+fn get_config(path: &PathBuf) -> Result<Config> {
+    let mut f = std::fs::File::open(path)
+        .context(format!("Failed to open file {}", path.as_path().display()))?;
     let mut buf = String::new();
     f.read_to_string(&mut buf)?;
-    let config: Config = toml::from_str(&buf).expect("Toml parse error.");
+    let config: Config = toml::from_str(&buf).context("Failed to parse toml")?;
     Ok(config)
 }
 
-fn set_username(username: &str, path: &PathBuf, base_url: &str) -> std::io::Result<()> {
-    let mut f = std::fs::File::create(path)?;
-    let config = Config {
-        base_url: base_url.into(),
-        username: Some(username.into())
-    };
-    f.write_all(toml::to_string(&config).unwrap().as_bytes())?;
+fn save_history(token: &str, path: &PathBuf) -> Result<()> {
+    let mut f = std::fs::File::create(path).context(format!(
+        "Failed to create file {}",
+        path.as_path().display()
+    ))?;
+    f.write_all(token.as_bytes()).context(format!(
+        "Failed to write to file {}",
+        path.as_path().display()
+    ))?;
     Ok(())
 }
 
-fn save_history(token: &str, path: &PathBuf) -> std::io::Result<()> {
-    let mut f = std::fs::File::create(path)?;
-    f.write_all(token.as_bytes())?;
-    Ok(())
-}
-
-fn read_history(path: &PathBuf) -> std::io::Result<String> {
-    let mut f = std::fs::File::open(path)?;
+fn read_history(path: &PathBuf) -> Result<String> {
+    let mut f = std::fs::File::open(path)
+        .context(format!("Failed to open file {}", path.as_path().display()))?;
     let mut buf = String::new();
-    f.read_to_string(&mut buf)?;
+    f.read_to_string(&mut buf).context(format!(
+        "Failed to read from file {}",
+        path.as_path().display()
+    ))?;
     Ok(buf)
 }
 
@@ -43,27 +60,32 @@ fn read_history(path: &PathBuf) -> std::io::Result<String> {
 #[clap(author, version, about, long_about = None)]
 struct Cli {
     #[clap(subcommand)]
-    command: Commands
+    command: Commands,
 }
 
 #[derive(Subcommand)]
 enum Commands {
-    Get { token: String },
-    Send { message: Option<String> },
-    Delete { token: String },
-    Username { name: String },
+    Get {
+        token: String,
+    },
+    Send {
+        message: Option<String>,
+    },
+    Delete {
+        token: String,
+    },
     Last,
     File {
         #[clap(subcommand)]
-        command: V2Commands
-    }
+        command: V2Commands,
+    },
 }
 
 #[derive(Subcommand)]
 enum V2Commands {
-    Get { token: String },
+    Get { filename: String },
     Send { path: PathBuf },
-    Delete { token: String },
+    Delete { filename: String },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -72,88 +94,118 @@ struct ExchangeMessage {
     username: String,
 }
 
-fn main() -> std::io::Result<()> {
-    let mut home_dir = home::home_dir().unwrap();
-    home_dir.push(".config");
-    home_dir.push("paste-client");
-    let config_path = {
-        let mut config_path = home_dir.clone();
-        config_path.push("config.toml");
-        config_path
-    };
-    let history_path = {
-        let mut history_path = home_dir;
-        history_path.push("history_token");
-        history_path
-    };
-    let config = get_url(&config_path).unwrap();
-    let (base_url, username) = (config.base_url, config.username.unwrap_or("Anonymous".into()));
-    let end_char = if cfg!(target_os = "windows") { 'Z' } else { 'D' };
-    let base_url_v2 = format!("{}/v2", base_url);
+#[tokio::main]
+async fn main() -> Result<()> {
+    let config_dir = home::home_dir()
+        .expect("You must have a home directory to use this tool.")
+        .join(".config")
+        .join("paste-client");
+    let config_path = config_dir.join("config.toml");
+    let history_path = config_dir.join("history_token");
 
+    let config = get_config(&config_path)?;
+    let base_url = url::Url::parse(config.base_url.as_str())?;
+
+    let client = if let Some(proxy) = config.proxy {
+        reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy)?)
+            .build()?
+    } else {
+        reqwest::Client::new()
+    };
     let cli = Cli::parse();
     match cli.command {
         Commands::Get { token } => {
-            let url = format!("{}/{}", base_url, token);
-            let message: ExchangeMessage = serde_json::from_str(&reqwest::blocking::get(url).unwrap().text().unwrap()).unwrap();
-            println!("User {} pasted:", &message.username);
-            println!("{}", &message.content);
-        },
+            let url = base_url.join(token.as_str())?;
+            let resp = client.get(url).send().await?;
+            let message = resp.text().await?;
+            println!("{}", message);
+        }
         Commands::Send { message } => {
-            let content = message.unwrap_or_else(|| {
+            let message = message.unwrap_or_else(|| {
                 let mut content = String::new();
-                println!("Input the message. Ctrl + {} to end.", end_char);
+                println!("Input the message. Ctrl + {} to end.", END_CHAR);
                 stdin().read_to_string(&mut content).unwrap();
                 content
             });
-            let message = serde_json::to_string(&ExchangeMessage {
-                content,
-                username: username.into()
-            }).unwrap();
-            let client = reqwest::blocking::Client::new();
-            let resp = client.post(&base_url).body(message).send().unwrap();
-            let token = resp.text().unwrap();
-            save_history(&token, &history_path).expect("Failed to record history");
-            println!("\n{}/{}", &base_url, &token);
-        },
+            let resp = client.post(base_url.as_ref()).body(message).send().await?;
+            let token = resp.text().await?;
+            save_history(&token, &history_path).context("Failed to record history.")?;
+
+            println!("\n{}", base_url.join(token.as_str())?);
+        }
         Commands::Delete { token } => {
-            let url = format!("{}/{}", base_url, token);
-            let client = reqwest::blocking::Client::new();
-            let resp = client.delete(url).send().unwrap();
-            println!("{}", resp.text().unwrap());
-        },
-        Commands::Username { name } => set_username(&name, &config_path, &base_url)?,
+            let url = base_url.join(token.as_str())?;
+            let resp = client.delete(url).send().await?;
+            println!("{}", resp.text().await?);
+        }
         Commands::Last => println!(
-            "{}/{}",
-            base_url,
-            read_history(&history_path).unwrap_or("No history recorded!".to_string())
+            "{}",
+            base_url
+                .join(
+                    read_history(&history_path)
+                        .context("No history recorded.")?
+                        .as_str()
+                )?
+                .as_str(),
         ),
         Commands::File { command } => match command {
-            V2Commands::Get { token } => {
-                let url = format!("{}/{}", base_url_v2, token);
-                let mut downloaded = std::fs::File::create(&token).unwrap();
-                let resp = reqwest::blocking::get(url).unwrap();
-                downloaded.write_all(&resp.bytes().unwrap()).unwrap();
-                println!("Downloaded file {}", &token);
-            },
+            V2Commands::Get { filename } => {
+                let url = base_url.join("v2/")?.join(filename.as_str())?;
+                let mut downloaded = tokio::fs::File::create(&filename)
+                    .await
+                    .context("Failed to create file.")?;
+
+                let header_resp = client.head(url.as_ref()).send().await?;
+                if let Some(content_length) = header_resp.content_length() {
+                    if content_length == 0 {
+                        println!("File not exist or length is zero, exiting...");
+                        exit(0);
+                    }
+                    let progress_bar = ProgressBar::new(content_length);
+                    progress_bar
+                        .set_style(ProgressStyle::with_template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {bytes}/{total_bytes} ({eta})")?
+                        .with_key("eta", |state: &ProgressState, w: &mut dyn std::fmt::Write| write!(w, "{:.1}s", state.eta().as_secs_f64()).unwrap())
+                        .progress_chars("#>-"));
+                    let mut resp = client.get(url.as_ref()).send().await?;
+                    while let Some(bytes) = resp.chunk().await? {
+                        progress_bar.inc(bytes.len() as u64);
+                        downloaded.write_all(&bytes).await?;
+                    }
+                } else {
+                    println!("Downloading...");
+                    let resp = client.get(url.as_ref()).send().await?;
+                    downloaded.write_all(&resp.bytes().await?).await?;
+                }
+
+                println!("Downloaded file {}", &filename);
+            }
             V2Commands::Send { path } => {
-                let client = reqwest::blocking::Client::new();
-                let uploading = std::fs::File::open(path).unwrap();
-                let resp = client.post(&format!("{}/", base_url_v2))
-                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(uploading)
-                    .send()
-                    .unwrap();
-                let token = resp.text().unwrap();
-                println!("{}/{}", &base_url_v2, &token);
-            },
-            V2Commands::Delete { token } => {
-                let url = format!("{}/{}", base_url_v2, token);
-                let client = reqwest::blocking::Client::new();
-                let resp = client.delete(url).send().unwrap();
-                println!("{}", resp.text().unwrap());    
-            },
-        }
+                let url = base_url.join("v2/")?;
+                let filename = path
+                    .file_name()
+                    .context("This is not a file.")?
+                    .to_string_lossy()
+                    .into_owned();
+                let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
+                let mime = mime_guess::from_ext(ext).first_or_octet_stream();
+                let file = tokio::fs::File::open(path.as_path()).await?;
+                let part =
+                    Part::stream(Body::wrap_stream(FramedRead::new(file, BytesCodec::new())))
+                        .file_name(filename)
+                        .mime_str(mime.essence_str())?;
+                let form = Form::new().part("file", part);
+
+                println!("Uploading...");
+                let resp = client.post(url).multipart(form).send().await?;
+                println!("{}", resp.text().await?);
+            }
+            V2Commands::Delete { filename } => {
+                let url = base_url.join("v2/")?.join(filename.as_str())?;
+                let resp = client.delete(url).send().await?;
+                println!("{}", resp.text().await?);
+            }
+        },
     }
     Ok(())
 }
