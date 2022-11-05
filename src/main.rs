@@ -192,6 +192,7 @@ async fn main() -> Result<()> {
                     .context("This is not a file.")?
                     .to_string_lossy()
                     .into_owned();
+                let full_url = url.clone().join(filename.as_str())?;
                 let ext = path.extension().and_then(|ext| ext.to_str()).unwrap_or("");
                 let mime = mime_guess::from_ext(ext).first_or_octet_stream();
                 let file = tokio::fs::File::open(path.as_path()).await?;
@@ -204,6 +205,7 @@ async fn main() -> Result<()> {
                 println!("Uploading...");
                 let resp = client.post(url).multipart(form).send().await?;
                 println!("{}", resp.text().await?);
+                println!("{}", full_url);
             }
             V2Commands::Delete { filename } => {
                 let url = base_url.join("v2/")?.join(filename.as_str())?;
